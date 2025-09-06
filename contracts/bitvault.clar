@@ -207,3 +207,116 @@
     (ok true)
   )
 )
+
+;; CORE LENDING OPERATIONS
+
+;; Deposit Bitcoin collateral into protocol vault
+(define-public (deposit-collateral (collateral-amount uint))
+  (begin
+    (asserts! (var-get protocol-active) ERR-NOT-INITIALIZED)
+    (asserts! (> collateral-amount u0) ERR-INVALID-AMOUNT)
+
+    ;; Update total collateral locked
+    (var-set total-btc-collateral
+      (+ (var-get total-btc-collateral) collateral-amount)
+    )
+
+    (ok true)
+  )
+)
+
+;; Create new collateralized loan
+(define-public (originate-loan
+    (collateral-amount uint)
+    (requested-loan-amount uint)
+  )
+  (let (
+      (btc-price-data (unwrap! (map-get? asset-price-registry { asset-symbol: "BTC" })
+        ERR-NOT-INITIALIZED
+      ))
+      (collateral-value (* collateral-amount (get current-price btc-price-data)))
+      (required-collateral (* requested-loan-amount (var-get min-collateral-ratio)))
+      (new-loan-id (+ (var-get loan-counter) u1))
+    )
+    (begin
+      (asserts! (var-get protocol-active) ERR-NOT-INITIALIZED)
+      (asserts! (>= (* collateral-value u100) required-collateral)
+        ERR-INSUFFICIENT-COLLATERAL
+      )
+
+      ;; Create loan record
+      (map-set loan-registry { loan-id: new-loan-id } {
+        borrower: tx-sender,
+        collateral-amount: collateral-amount,
+        borrowed-amount: requested-loan-amount,
+        annual-interest-rate: u500, ;; 5% annual interest
+        creation-height: stacks-block-height,
+        last-update-height: stacks-block-height,
+        loan-status: "active",
+      })
+
+      ;; Update user's loan registry
+      (match (map-get? user-loan-registry { borrower: tx-sender })
+        existing-loans (map-set user-loan-registry { borrower: tx-sender } { active-loan-ids: (unwrap!
+          (as-max-len? (append (get active-loan-ids existing-loans) new-loan-id)
+            u10
+          )
+          ERR-INVALID-AMOUNT
+        ) }
+        )
+        (map-set user-loan-registry { borrower: tx-sender } { active-loan-ids: (list new-loan-id) })
+      )
+
+      ;; Increment loan counter
+      (var-set loan-counter new-loan-id)
+
+      (ok new-loan-id)
+    )
+  )
+)
+
+;; Repay loan with accrued interest
+(define-public (repay-loan-full
+    (loan-id uint)
+    (repayment-amount uint)
+  )
+  (let (
+      (loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+      (accrued-interest (compute-accrued-interest (get borrowed-amount loan-data)
+        (get annual-interest-rate loan-data)
+        (- stacks-block-height (get last-update-height loan-data))
+      ))
+      (total-repayment-due (+ (get borrowed-amount loan-data) accrued-interest))
+    )
+    (begin
+      (asserts! (is-valid-loan-id loan-id) ERR-INVALID-LOAN-ID)
+      (asserts! (is-eq (get loan-status loan-data) "active") ERR-LOAN-INACTIVE)
+      (asserts! (is-eq (get borrower loan-data) tx-sender) ERR-UNAUTHORIZED)
+      (asserts! (>= repayment-amount total-repayment-due) ERR-INVALID-AMOUNT)
+
+      ;; Mark loan as repaid
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data {
+          loan-status: "repaid",
+          last-update-height: stacks-block-height,
+        })
+      )
+
+      ;; Release collateral
+      (var-set total-btc-collateral
+        (- (var-get total-btc-collateral) (get collateral-amount loan-data))
+      )
+
+      ;; Remove from user's active loans
+      (match (map-get? user-loan-registry { borrower: tx-sender })
+        existing-loans (map-set user-loan-registry { borrower: tx-sender } { active-loan-ids: (filter (lambda (id) (not (is-eq id loan-id)))
+          (get active-loan-ids existing-loans)
+        ) }
+        )
+        true
+      )
+
+      (ok total-repayment-due)
+    )
+  )
+)
