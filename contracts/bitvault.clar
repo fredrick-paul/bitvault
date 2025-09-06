@@ -320,3 +320,93 @@
     )
   )
 )
+
+;; PROTOCOL GOVERNANCE & ADMINISTRATION
+
+;; Update minimum collateral requirements
+(define-public (update-collateral-requirements (new-min-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= new-min-ratio u110) ERR-INVALID-AMOUNT) ;; Minimum 110%
+
+    (var-set min-collateral-ratio new-min-ratio)
+    (ok true)
+  )
+)
+
+;; Update liquidation threshold
+(define-public (update-liquidation-parameters (new-liquidation-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (>= new-liquidation-ratio u105) ERR-INVALID-AMOUNT) ;; Minimum 105%
+
+    (var-set liquidation-ratio new-liquidation-ratio)
+    (ok true)
+  )
+)
+
+;; Update asset price feeds (Oracle integration)
+(define-public (update-asset-price
+    (asset-symbol (string-ascii 3))
+    (new-price uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (is-supported-asset asset-symbol) ERR-UNSUPPORTED-ASSET)
+    (asserts! (is-valid-price-data new-price) ERR-INVALID-PRICE-DATA)
+
+    (map-set asset-price-registry { asset-symbol: asset-symbol } {
+      current-price: new-price,
+      last-updated: stacks-block-height,
+    })
+
+    (ok true)
+  )
+)
+
+;; READ-ONLY QUERY FUNCTIONS
+
+;; Retrieve comprehensive loan information
+(define-read-only (get-loan-info (loan-id uint))
+  (map-get? loan-registry { loan-id: loan-id })
+)
+
+;; Get all active loans for a specific user
+(define-read-only (get-user-active-loans (borrower principal))
+  (map-get? user-loan-registry { borrower: borrower })
+)
+
+;; Get current asset price information
+(define-read-only (get-asset-price (asset-symbol (string-ascii 3)))
+  (map-get? asset-price-registry { asset-symbol: asset-symbol })
+)
+
+;; Retrieve protocol statistics and metrics
+(define-read-only (get-protocol-metrics)
+  {
+    total-btc-locked: (var-get total-btc-collateral),
+    total-loans-created: (var-get loan-counter),
+    min-collateral-ratio: (var-get min-collateral-ratio),
+    liquidation-threshold: (var-get liquidation-ratio),
+    protocol-fee-rate: (var-get protocol-fee),
+    protocol-status: (var-get protocol-active),
+  }
+)
+
+;; Get list of all supported collateral assets
+(define-read-only (get-supported-assets)
+  SUPPORTED-ASSETS
+)
+
+;; Calculate current loan health ratio
+(define-read-only (calculate-loan-health (loan-id uint))
+  (match (map-get? loan-registry { loan-id: loan-id })
+    loan-data (match (map-get? asset-price-registry { asset-symbol: "BTC" })
+      price-data (ok (compute-collateral-ratio (get collateral-amount loan-data)
+        (get borrowed-amount loan-data) (get current-price price-data)
+      ))
+      ERR-NOT-INITIALIZED
+    )
+    ERR-LOAN-NOT-FOUND
+  )
+)
