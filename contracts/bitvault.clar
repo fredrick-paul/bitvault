@@ -101,3 +101,109 @@
     ratio-percentage
   )
 )
+
+;; Calculate compound interest over block periods
+(define-private (compute-accrued-interest
+    (principal-amount uint)
+    (interest-rate uint)
+    (block-duration uint)
+  )
+  (let (
+      (daily-rate (/ interest-rate u365))
+      (block-rate (/ daily-rate BLOCKS-PER-DAY))
+      (total-interest (/ (* principal-amount block-rate block-duration) u10000))
+    )
+    total-interest
+  )
+)
+
+;; RISK MANAGEMENT & LIQUIDATION SYSTEM
+
+;; Comprehensive liquidation health check
+(define-private (assess-liquidation-risk (loan-id uint))
+  (let (
+      (loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+      (btc-price-data (unwrap! (map-get? asset-price-registry { asset-symbol: "BTC" })
+        ERR-NOT-INITIALIZED
+      ))
+      (current-ratio (compute-collateral-ratio (get collateral-amount loan-data)
+        (get borrowed-amount loan-data) (get current-price btc-price-data)
+      ))
+    )
+    (if (<= current-ratio (var-get liquidation-ratio))
+      (execute-liquidation loan-id)
+      (ok true)
+    )
+  )
+)
+
+;; Execute automated liquidation process
+(define-private (execute-liquidation (loan-id uint))
+  (let (
+      (loan-data (unwrap! (map-get? loan-registry { loan-id: loan-id }) ERR-LOAN-NOT-FOUND))
+      (borrower-address (get borrower loan-data))
+    )
+    (begin
+      ;; Update loan status to liquidated
+      (map-set loan-registry { loan-id: loan-id }
+        (merge loan-data { loan-status: "liquidated" })
+      )
+
+      ;; Remove from user's active loans
+      (map-delete user-loan-registry { borrower: borrower-address })
+
+      ;; Reduce total collateral counter
+      (var-set total-btc-collateral
+        (- (var-get total-btc-collateral) (get collateral-amount loan-data))
+      )
+
+      (ok true)
+    )
+  )
+)
+
+;; VALIDATION & SECURITY FUNCTIONS
+
+;; Validate loan ID exists and is within bounds
+(define-private (is-valid-loan-id (loan-id uint))
+  (and (> loan-id u0) (<= loan-id (var-get loan-counter)))
+)
+
+;; Verify asset is supported by protocol
+(define-private (is-supported-asset (asset (string-ascii 3)))
+  (is-some (index-of SUPPORTED-ASSETS asset))
+)
+
+;; Validate price data integrity
+(define-private (is-valid-price-data (price uint))
+  (and (> price u0) (<= price MAX-PRICE-VALUE))
+)
+
+;; Helper function for loan ID filtering
+(define-private (filter-loan-id
+    (target-id uint)
+    (current-id uint)
+  )
+  (not (is-eq target-id current-id))
+)
+
+;; PROTOCOL INITIALIZATION & GOVERNANCE
+
+;; Initialize BitVault Protocol (One-time setup)
+(define-public (initialize-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts! (not (var-get protocol-active)) ERR-ALREADY-INITIALIZED)
+
+    ;; Activate protocol
+    (var-set protocol-active true)
+
+    ;; Initialize default asset prices (placeholder)
+    (map-set asset-price-registry { asset-symbol: "BTC" } {
+      current-price: u4500000,
+      last-updated: stacks-block-height,
+    })
+
+    (ok true)
+  )
+)
